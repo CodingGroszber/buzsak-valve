@@ -1,15 +1,48 @@
-# Garden Valve Control — ESP32-ACDC-RELAY4-M
+# Garden Valve Control
 
-Firmware for a 4-channel AC/DC relay board driving garden valves.
-Structure and conventions follow the sister project `Garden_IS_ESP32_PLC_14_IO`:
-procedural modules, a `WebServer` JSON API, ArduinoOTA + ElegantOTA, and WiFi
-credentials kept in source with a gitignored `login.md` as the reference copy.
+Irrigation controller for a 4-channel AC/DC relay board: WiFi, a web dashboard, a
+JSON API, over-the-air updates, and two RS485 temperature/humidity probes.
+
+Built in the style of its sister project `Garden_IS_ESP32_PLC_14_IO` — procedural
+modules, no RTOS tasks, no classes, all state in module-local statics.
+
+```
+                    ┌──────────────────────────────┐
+   230 V AC ───────►│  ESP32-ACDC-RELAY4-M         │
+                    │                              │
+   WiFi  ◄─────────►│  ESP32-WROOM-32E             │
+                    │                              │
+                    │  4x SPDT relay ──────────────┼──► valves
+                    │  UART2 ── MAX3485 ───────────┼──► RS485: Sensor-A, Sensor-B
+                    └──────────────────────────────┘
+```
+
+**Contents** — [Quick start](#quick-start) · [Hardware](#hardware) ·
+[Firmware](#firmware) · [HTTP API](#http-api) · [Build &amp; upload](#build--upload) ·
+[Commissioning](#commissioning-rs485) · [Troubleshooting](#troubleshooting)
 
 ---
 
-## 1. Hardware
+## Quick start
 
-### 1.1 Board
+```powershell
+# 1. credentials
+Copy-Item include/secrets.example.h include/secrets.h   # then fill it in
+
+# 2. build and flash over the air
+pio run -t upload
+
+# 3. check it
+(Invoke-WebRequest http://192.168.1.109/api/state -UseBasicParsing).Content
+```
+
+Dashboard: `http://192.168.1.109/`
+
+---
+
+## Hardware
+
+### Board
 
 | Item | Value |
 | --- | --- |
@@ -18,342 +51,294 @@ credentials kept in source with a gitignored `login.md` as the reference copy.
 | Module | DOIT `ESP32-32E N4` = ESP32-WROOM-32E |
 | Chip | ESP32-D0WD-V3 rev 3.1, dual core 240 MHz, 40 MHz crystal |
 | Flash | 4 MB |
-| Radio | WiFi 802.11 b/g/n + Bluetooth, u.FL/SMA antenna connector |
 | Relays | 4x SPDT, COM / NO / NC screw terminals |
 | Supply | 90–250 V AC **or** 7–30 V DC **or** 5 V DC (separate connectors) |
-| Size | 93 x 87 mm |
-| Extras | 1 programmable button (IO0), 1 programmable LED, 4 relay indicator LEDs, 2x 10x2 GPIO headers |
-| This unit's MAC | `04:B2:47:86:14:9C` |
+| Extras | programmable button, programmable LED, 4 relay LEDs, 2x 10x2 GPIO headers |
+| MAC | `04:B2:47:86:14:9C` |
 
-### 1.2 Pin map
+### Pin map
+
+Defined once in [include/config.h](include/config.h).
 
 | Signal | GPIO | Notes |
 | --- | --- | --- |
-| Relay 1 | 32 | HIGH = coil energised (driven via darlington array) |
-| Relay 2 | 33 | |
-| Relay 3 | 25 | |
-| Relay 4 | 26 | |
-| Status LED | 23 | blinks 2 Hz while connecting, solid = WiFi up |
-| Programmable button | 0 | also the boot strapping pin / programming jumper |
-| UART0 TX / RX | 1 / 3 | programming header |
-| RS485 RX (`RO`) | 16 | UART2, from MAX3485 |
-| RS485 TX (`DI`) | 17 | UART2, to MAX3485 |
+| Valve 1–4 | 32, 33, 25, 26 | HIGH = coil energised (darlington driver) |
+| Status LED | 23 | 2 Hz blink while connecting, solid = WiFi up |
+| Button | 0 | also the boot strapping pin |
+| RS485 `RO` → RX | 16 | UART2 |
+| RS485 `DI` ← TX | 17 | UART2 |
 | RS485 `DE` | 4 | HIGH while transmitting |
+| UART0 TX / RX | 1, 3 | programming header / console |
 
-The two 10x2 headers break out every remaining ESP32 GPIO for future sensors.
-
-### 1.3 Programming header
+### Programming header
 
 ```
 5V   TX   RX   GND   GND   IO0
 ```
 
-- **All logic pins are 3.3 V level** — use a 3.3 V-capable USB-TTL adapter.
-- `TX`/`RX` on the header are the *board's* pins: connect adapter `RX` -> board `TX`
-  and adapter `TX` -> board `RX`.
-- There is **no auto-reset circuit** on this header. Download mode is entered by
-  jumpering `IO0` to `GND` and then resetting (EN button or power cycle).
+3.3 V logic. Adapter `RX` → board `TX`, adapter `TX` → board `RX`. There is **no
+auto-reset circuit**: download mode needs `IO0` jumpered to `GND` followed by a
+reset.
 
-> **Power warning.** A USB-TTL adapter cannot supply the four relay coils
-> (~70–90 mA each). The board flashes fine on adapter power, but as soon as the
-> relays switch it browns out and goes silent on UART. For any functional test,
-> power the board from 230 V AC or the dedicated 5 V / 7–30 V DC terminal.
-> Never feed 3.3 V into the `5V` pin — the MCU browns out.
+> [!WARNING]
+> A USB-TTL adapter cannot supply the four relay coils (~70–90 mA each). The board
+> flashes fine on adapter power, but browns out the moment a relay switches. Power
+> it from 230 V AC or the DC terminal for any functional test, and never feed
+> 3.3 V into the `5V` pin.
 
-> **Mains safety.** Do not leave the USB-TTL adapter attached while the board is
-> powered from 230 V AC. Disconnect mains before touching the programming header.
+> [!CAUTION]
+> Do not leave the USB-TTL adapter attached while the board runs on 230 V AC.
+> Disconnect mains before touching the programming header.
 
-### 1.4 RS485 sensor bus
+### RS485 sensor bus
 
-LY485 temperature/humidity probes on a **MAX3485** TTL-RS485 module (3.3 V part —
-at 5 V its `RO` output would overstress the ESP32 input).
+LY485 probes on a **MAX3485** module — a 3.3 V part, because at 5 V its `RO`
+output would overstress the ESP32 input.
 
-| MAX3485 pin | Connects to |
+| MAX3485 | Connects to |
 | --- | --- |
-| `VCC` | board `3V3` |
-| `GND` | board `GND` |
-| `RO` | `G16` |
-| `DI` | `G17` |
+| `VCC` / `GND` | board `3V3` / `GND` |
+| `RO` / `DI` | `G16` / `G17` |
 | `DE` | `G4` |
 | `RE` | **`GND`** — receiver permanently enabled |
-| `A` | sensor **yellow** (485-A) |
-| `B` | sensor **green** (485-B) |
-| `GND` (bus side) | sensor **black** |
+| `A` / `B` | sensor **yellow** / **green** |
+| `GND` (bus) | sensor **black** |
 
-Sensor **red** goes to the board's `5V` pin (probe accepts DC 5–24 V; measured
-4.85 V at the sensor, which works). For long buried runs feed it from 12/24 V
-instead, to stay clear of the drop.
+Sensor **red** → board `5V` (probes accept DC 5–24 V; 4.85 V measured at the
+sensor works). Feed long buried runs from 12/24 V instead, to stay clear of the
+voltage drop.
 
-**Why `RE` is tied to GND rather than switched with `DE`:** it leaves the receiver
-always on, so every transmission echoes back into `RO`. `findFrame()` skips the
-echo, and in exchange the echo acts as a permanent self-test of the whole analog
-path — ESP32 -> `DI` -> driver -> A/B -> receiver -> `RO`. If the echo disappears,
-the transceiver or its wiring is at fault, not the sensor.
+> [!NOTE]
+> **Why `RE` is grounded instead of switched with `DE`.** The receiver stays on
+> during transmission, so every request echoes back into `RO`. `findFrame()`
+> skips the echo, and in return the echo becomes a permanent self-test of the
+> whole analog path: ESP32 → `DI` → driver → A/B → receiver → `RO`. If the echo
+> disappears, the fault is the transceiver or its wiring, not the sensor.
+> Diagnosing a silent bus without that signal is far harder.
 
-Bus rules: daisy-chain (never star), twisted pair for A/B, and each sensor needs a
-**unique Modbus address** — they all ship as address `1`. Two probes are fitted,
-at addresses `1` and `2`; see section 2.7 for how to readdress one over the bus
-without the vendor Windows tool.
+Daisy-chain the bus (never star) and use a twisted pair for A/B. Each probe needs
+a **unique Modbus address** — see [Commissioning](#commissioning-rs485).
+
+### Valves
+
+The intended actuators are Hunter PGV-100-G-B, which have **24 V AC** solenoids
+(370 mA inrush, 210 mA holding at 50 Hz, minimum 19 V AC). The site supply is
+24 V DC, so a 24 V AC transformer is still to be fitted — a DC coil would draw
+~0.9 A through the ~27 Ω winding and burn out.
+
+Wire the field side as COM + NO, so every valve is closed whenever the board is
+off, rebooting or mid-update.
 
 ---
 
-## 2. Software
+## Firmware
 
-### 2.1 Toolchain
+### Module layout
 
-| Item | Version |
-| --- | --- |
-| PlatformIO Core | 6.1.19 |
-| Platform | `espressif32` 7.0.1 |
-| Board definition | `esp32dev` (generic ESP32-WROOM, matches the -32E module) |
-| Framework | Arduino ESP32 3.20017 |
-| Partition table | platform default (`default.csv`): 2x 1.25 MB OTA app slots |
-
-Current build: ~828 KB of the 1.25 MB app partition, ~49 KB RAM.
-
-### 2.2 Dependencies
-
-| Library | Purpose |
-| --- | --- |
-| `ayushsharma82/ElegantOTA@^3.0.0` | HTTP firmware updater at `/update` |
-| `WebServer` (Arduino core) | JSON API + dashboard on port 80 |
-| `ArduinoOTA` (Arduino core) | UDP 3232 updater, espota-compatible |
-
-### 2.3 Project structure
+Each `.cpp`/`.h` pair is one subsystem, split by responsibility rather than by
+convenience:
 
 ```
-platformio.ini          two envs: ota (default) and usb
-src/main.cpp            IO layout (OUTPUTS[], SENSORS[]) + setup/loop
-src/wifi_network.cpp    WiFi, ArduinoOTA, ElegantOTA, HTTP routes, dashboard
-src/logic.cpp           button handling + optional relay click-test
-src/sensors.cpp         RS485 Modbus RTU master for the LY485 probes
-include/io_config.h     shared types, pin documentation, FIRMWARE_VERSION
-include/wifi_network.h  network module API
-include/logic.h         logic module API
-include/sensors.h       sensor module API
+src/main.cpp            hardware inventory (OUTPUTS[], SENSORS[]) + setup/loop
+src/valve_control.cpp   relay switching, button, automation rungs
+src/sensors.cpp         RS485 Modbus RTU master
+src/wifi_network.cpp    WiFi association + ArduinoOTA (UDP)
+src/web.cpp             dashboard, JSON API, ElegantOTA (HTTP)
+
+include/config.h        every tunable constant in the project
+include/io_config.h     IOOutput / IOSensor types, extern tables
 include/secrets.h       WiFi + OTA credentials (gitignored)
-scripts/http_ota.py     stdlib-only ElegantOTA uploader used by [env:ota]
-docs/manual.md          OCR of the LY485 protocol manual (docling)
-login.md                credentials reference (gitignored)
+
+scripts/http_ota.py     stdlib-only ElegantOTA uploader
+docs/manual.md          OCR of the LY485 protocol manual
 ```
 
-### 2.4 Program flow
+OTA is split by transport: `wifi_network.cpp` owns the UDP-based ArduinoOTA,
+`web.cpp` owns the HTTP-based ElegantOTA, alongside the server they share.
+
+### Program flow
 
 ```
 setup()
-  Serial.begin(115200)
-  pinMode/LOW for every OUTPUTS[] entry     <- relays start de-energised
-  setupNetwork()
-      connectWiFi()                          <- blocks, blinks status LED
-      ArduinoOTA config + begin()
-      HTTP routes + ElegantOTA.begin() + server.begin()
-  logicSetup()                               <- button pinMode, relays off
-  sensorsSetup()                             <- UART2 + DE pin
+  valveControlSetup()    all relays LOW first — a reset must never leave a
+                         valve energised while the network comes up
+  wifiSetup()            blocks until associated, then starts ArduinoOTA
+  webSetup()             routes + ElegantOTA + server.begin()
+  sensorsSetup()         UART2 + DE pin
 
-loop()   every 50 ms
-  loopNetwork()  ArduinoOTA.handle() + server.handleClient()
-                 + ElegantOTA.loop() + WiFi watchdog (auto reconnect)
-  logicLoop()    button poll (+ click-test when RELAY_TEST_ENABLED=1)
-  sensorsLoop()  non-blocking Modbus poll, one sensor per 5 s
-  delay(50)
+loop()   every SCAN_CYCLE_MS (50 ms)
+  wifiLoop()             ArduinoOTA + association watchdog
+  webLoop()              HTTP requests + ElegantOTA
+  valveControlLoop()     button + automation rungs
+  sensorsLoop()          non-blocking Modbus poll, one probe per 5 s
 ```
 
-State is held in module-local `static` variables; there are no classes, no
-RTOS tasks, and no blocking calls in `loop()` other than the 50 ms scan delay.
+Nothing in `loop()` blocks except the final delay. State lives in module-local
+`static` variables; there are no classes and no RTOS tasks.
 
-### 2.5 IO layout — adding or removing relays
+### Adding hardware
 
-Edit `OUTPUTS[]` in [src/main.cpp](src/main.cpp):
+Both tables live in [src/main.cpp](src/main.cpp) and are the only thing that
+needs editing — the API, dashboard, button and poller all iterate them.
 
 ```cpp
 IOOutput OUTPUTS[] = {
-    {"relay1", "Relay 1", 32, true},
-    ...
-    {"status_led", "Status LED", 23, false},
+    {"relay1", "Valve 1", RELAY_1_PIN, true},   // name, label, pin, controllable
+    {"status_led", "Status LED", STATUS_LED_PIN, false},
+};
+
+IOSensor SENSORS[] = {
+    {"sensor_a", "Sensor-A", 1},                // name, label, Modbus address
+    {"sensor_b", "Sensor-B", 2},
 };
 ```
 
-| Field | Meaning |
-| --- | --- |
-| `name` | API key used by `/api/control` and `/api/state` |
-| `label` | Human-readable name shown on the dashboard |
-| `pin` | GPIO number |
-| `controllable` | `true` = settable via the API **and** included in the click-test |
+`controllable = false` keeps an entry visible on the dashboard while excluding it
+from the API, the button and the click-test — used for the status LED.
 
-`wifiLedIndex()` looks up the entry named `status_led`; rename it and the WiFi
-indicator is disabled (returns `-1`), everything else keeps working.
+### Valve control
 
-### 2.6 Button and relay click-test
+Every relay write goes through `valveSet()`. Interlocks added there apply to the
+API, the button and the automation at once — the natural home for a future
+"one zone at a time" rule or a minimum gap between switching operations.
 
-Implemented in [src/logic.cpp](src/logic.cpp).
+**Button (GPIO0)** — debounced 50 ms falling edge, always active:
 
-**Programmable button (GPIO0)** — always active, read with `INPUT_PULLUP`,
-pressed = LOW, debounced 50 ms on the falling edge.
+- normally: toggles the first controllable output (Valve 1)
+- with `RELAY_TEST_ENABLED=1`: drops all relays and restarts the click-test
 
-- With `RELAY_TEST_ENABLED=0` (current default): a press **toggles the first
-  controllable output** in `OUTPUTS[]`, i.e. relay 1. Logged as `[BTN] relay1 -> ON`.
-- With `RELAY_TEST_ENABLED=1`: a press drops all relays and restarts the cycle.
+> [!WARNING]
+> GPIO0 is the boot strapping pin. Holding the button while the board resets
+> enters serial download mode instead of running the firmware.
 
-> GPIO0 is also the boot strapping pin. Holding the button while the board
-> resets puts the ESP32 into download mode instead of running the firmware.
+**Click-test** (`RELAY_TEST_ENABLED=1`) exercises the wiring: one switching
+action per second, all relays ON in random order, then OFF in random order, then
+repeat. Turn it off before connecting real valves — switching a 1" valve once a
+second hammers the pipework.
 
-**Click-test** (only when `RELAY_TEST_ENABLED=1`) performs exactly one switching
-action per second:
+Sensor-driven rules go in `runAutomation()` in
+[src/valve_control.cpp](src/valve_control.cpp). Check `reading.valid` before
+acting: a probe that has dropped off the bus keeps its last values, and deciding
+on stale humidity would leave a valve open.
 
-1. **Fill phase** — a randomly chosen relay that is still OFF is switched ON,
-   once per second, until all four are ON.
-2. **Drain phase** — a randomly chosen relay that is still ON is switched OFF,
-   once per second, until all four are OFF.
-3. The phase flips and the cycle repeats.
+### RS485 sensors
 
-The random pick is a two-pass reservoir over `OUTPUTS[]` seeded from the hardware
-RNG (`esp_random()`). Only entries with `controllable = true` take part.
-
-Observed sequence (`/api/state` polled once per second, bit order relay1..relay4):
-
-```
-0011 -> 0111 -> 1111 -> 1011 -> 1001 -> 1000 -> 0000 -> 0100 -> 1100 -> 1101 -> 1111
-```
-
-### 2.7 RS485 sensors — Modbus RTU
-
-Implemented in [src/sensors.cpp](src/sensors.cpp). Hand-rolled master rather than a
-library: it is one frame type, and it keeps full control of the DE turnaround.
-
-Bus parameters: **9600 8N1**, CRC16 (poly `0xA001`, init `0xFFFF`, low byte first).
-The probe supports function `0x03` for reads and `0x06` for configuration writes.
+A hand-rolled Modbus RTU master rather than a library — it is one frame type, and
+it keeps full control of the DE turnaround. Bus is **9600 8N1**, CRC16
+(poly `0xA001`, seed `0xFFFF`, low byte first).
 
 | Register | Content | Access |
 | --- | --- | --- |
-| `0x0000` | Humidity x10, unsigned | read (FC03) |
-| `0x0001` | Temperature x10, **signed** two's complement | read (FC03) |
-| `0x0100` | Device address (factory default 1) | read/write |
+| `0x0000` | Humidity ×10, unsigned | read (FC03) |
+| `0x0001` | Temperature ×10, **signed** | read (FC03) |
+| `0x0100` | Device address | read/write (FC06) |
 | `0x0101` | Baud rate code | read/write |
-| `0x0104` | Temperature correction | read/write |
-| `0x0105` | Humidity correction | read/write |
+| `0x0104` / `0x0105` | Temperature / humidity correction | read/write |
 
-Both values are adjacent, so one transaction fetches both:
+Humidity and temperature are adjacent, so one transaction fetches both:
 
 ```
 Request :  01 03 00 00 00 02 C4 0B
 Response:  01 03 04 02 30 01 0C FA 11
                     ^^^^^ ^^^^^
-                    |     0x010C = 268  -> 26.8 °C
-                    0x0230 = 560  -> 56.0 %RH
+                    |     0x010C = 268  ->  26.8 °C
+                    0x0230 = 560  ->  56.0 %RH
 ```
 
-Temperature **must** be parsed as `int16_t` — sub-zero readings arrive as two's
-complement, so an unsigned parse turns −9.7 °C into +6543.9 °C.
+> [!IMPORTANT]
+> Temperature must be parsed as `int16_t`. Sub-zero readings arrive as two's
+> complement, so an unsigned parse turns −9.7 °C into +6543.9 °C.
 
-Adding a probe is a one-line edit to `SENSORS[]` in [src/main.cpp](src/main.cpp):
+Polling is a non-blocking state machine: one probe every 5 s, 300 ms response
+window, round-robin. `findFrame()` scans the buffer for a frame with a matching
+address, function code, byte count *and* CRC rather than assuming a fixed offset —
+that is what lets it ignore the TX echo and any turnaround noise.
 
-```cpp
-IOSensor SENSORS[] = {
-    {"th1", "Temp/Humidity 1", 1},   // name, label, Modbus slave address
-    {"th2", "Temp/Humidity 2", 2},
-};
-```
-
-Polling is a non-blocking state machine: one sensor every 5 s, 300 ms response
-window, round-robin across `SENSORS[]`. The 50 ms scan cycle never blocks waiting
-for a reply. `findFrame()` scans the RX buffer for a CRC-valid response rather than
-assuming a fixed offset, which is what lets it ignore the TX echo.
-
-Each reading carries `ok`, `errors`, `last_error` and the raw hex of the last RX
+Every reading carries `ok`, `errors`, `last_error` and the raw hex of the last RX
 buffer, so a misbehaving bus can be diagnosed entirely over HTTP.
 
-#### Readdressing a probe over the bus
+### Configuration
 
-Every probe ships as address `1`, so a second one must be moved before they can
-share the pair. No USB-RS485 adapter or vendor tool is needed — `POST
-/api/rs485/setaddr` writes register `0x0100` with function `0x06`:
+All constants live in [include/config.h](include/config.h) — pins, timings,
+Modbus registers, web settings. Nothing else in the project holds a magic number.
 
-1. Disconnect the **A/B wires of every other sensor** (power may stay on). The
-   write is broadcast to whoever answers at `from`, so all of them would take the
-   new address.
-2. Confirm the target is alone: `GET /api/rs485?addr=1` must return one clean frame.
-3. `POST /api/rs485/setaddr?from=1&to=2`
-4. A successful write echoes the request back:
-   ```
-   01 06 01 00 00 02 09 F7   <- our TX echo
-   01 06 01 00 00 02 09 F7   <- sensor acknowledgment
-   ```
-5. Verify with `GET /api/rs485?addr=2`, reconnect the other sensors, and add the
-   probe to `SENSORS[]`.
+| Setting | Location |
+| --- | --- |
+| WiFi SSID / password | `include/secrets.h` → `WIFI_SSID`, `WIFI_PASSWORD` |
+| ArduinoOTA hostname / password | `include/secrets.h` → `OTA_HOSTNAME`, `OTA_PASSWORD` |
+| ElegantOTA user / password | `include/secrets.h` → `OTA_HTTP_USER`, `OTA_HTTP_PASS` |
+| OTA target IP | `platformio.ini` `[env:ota]` → `upload_port` |
+| Serial port | `platformio.ini` `[env:usb]` → `upload_port` |
+| Firmware version | `include/config.h` → `FIRMWARE_VERSION` |
 
-Two probes answering on the same address produce corrupted frames rather than
-silence — e.g. `E0 30 78 FD 60 EC FF`, which fails CRC and shows up as `noframe`.
+`include/secrets.h` is gitignored. Copy
+[include/secrets.example.h](include/secrets.example.h) and fill it in before the
+first build — [scripts/http_ota.py](scripts/http_ota.py) reads `OTA_HTTP_USER` and
+`OTA_HTTP_PASS` from that same file, so firmware and uploader share one source of
+truth.
 
-### 2.8 Build flags
+**Build flags** ([platformio.ini](platformio.ini)):
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `RELAY_TEST_ENABLED` | `0` | `1` = random one-relay-per-second click-test and the button restarts the cycle; `0` = relays only move on API or button command |
+| `RELAY_TEST_ENABLED` | `0` | `1` = random one-relay-per-second click-test |
 
-Set it in `[env]` of [platformio.ini](platformio.ini).
+### Toolchain
 
-### 2.9 Configuration reference
+| Item | Version |
+| --- | --- |
+| PlatformIO Core | 6.1.19 |
+| Platform | `espressif32` 7.0.1 |
+| Board | `esp32dev` (generic ESP32-WROOM, matches the -32E) |
+| Framework | Arduino ESP32 3.20017 |
+| Partitions | default `default.csv` — 2x 1.25 MB OTA app slots |
+| Dependency | `ayushsharma82/ElegantOTA@^3.0.0` |
 
-| Setting | Location | Value |
-| --- | --- | --- |
-| WiFi SSID / password | `include/secrets.h` | `WIFI_SSID` / `WIFI_PASSWORD` |
-| ArduinoOTA hostname | `include/secrets.h` | `OTA_HOSTNAME` |
-| ArduinoOTA password | `include/secrets.h` | `OTA_PASSWORD` |
-| ElegantOTA user / password | `include/secrets.h` | `OTA_HTTP_USER` / `OTA_HTTP_PASS` |
-| OTA target IP | `platformio.ini` `[env:ota]` | `192.168.1.109` |
-| Serial port | `platformio.ini` `[env:usb]` | `COM6` |
-| Firmware version string | `include/io_config.h` | `FIRMWARE_VERSION` |
-
-`include/secrets.h` is gitignored. Copy
-[include/secrets.example.h](include/secrets.example.h) to `include/secrets.h` and
-fill in the real values before the first build — [scripts/http_ota.py](scripts/http_ota.py)
-reads `OTA_HTTP_USER` / `OTA_HTTP_PASS` from that same file, so there is one source
-of truth for both firmware and uploader.
+Current build: ~848 KB of the 1.25 MB app slot, ~50 KB RAM.
 
 ---
 
-## 3. HTTP API
+## HTTP API
 
-Base URL: `http://192.168.1.109`
+Base URL `http://192.168.1.109`.
 
-| Method | Path | Auth | Description |
-| --- | --- | --- | --- |
-| GET | `/` | none | Dashboard (auto-refresh every 2 s) |
-| GET | `/api/state` | none | Firmware version, IP, all output states |
-| POST | `/api/control?name=<key>&state=<0/1>` | none | Set one controllable output |
-| GET | `/api/rs485?addr=N[&loopback=1]` | none | Bring-up probe — one blocking Modbus read, returns the raw RX bytes |
-| GET | `/api/rs485/scan?max=N` | none | Sweeps every baud rate against addresses 1..N (blocking, ~12 s) |
-| POST | `/api/rs485/setaddr?from=A&to=B` | none | Changes a probe's Modbus address — only with a single sensor on the bus |
-| GET | `/update` | Basic | ElegantOTA web updater |
-| GET | `/ota/start?mode=firmware&hash=<md5>` | Basic | ElegantOTA handshake |
-| POST | `/ota/upload` | Basic | ElegantOTA multipart firmware upload |
+| Method | Path | Description |
+| --- | --- | --- |
+| GET | `/` | Dashboard, refreshes every 2 s |
+| GET | `/api/state` | Firmware, IP, relays and sensor readings |
+| POST | `/api/control?name=<key>&state=<0\|1>` | Switch one controllable output |
+| GET | `/api/rs485?addr=N[&loopback=1]` | Bus probe, returns raw bytes |
+| GET | `/api/rs485/scan?max=N` | Baud/address sweep (blocking, ~12 s) |
+| POST | `/api/rs485/setaddr?from=A&to=B` | Readdress a probe — one sensor only |
+| GET | `/update` | ElegantOTA (Basic auth) |
 
-`GET /api/state` response:
+`GET /api/state`:
 
 ```json
 {
-  "firmware": "v0.5",
+  "firmware": "v0.8",
   "ip": "192.168.1.109",
   "outputs": [
-    { "name": "relay1", "label": "Relay 1", "state": false, "controllable": true },
+    { "name": "relay1", "label": "Valve 1", "state": false, "controllable": true },
     { "name": "status_led", "label": "Status LED", "state": true, "controllable": false }
   ],
   "sensors": [
     {
-      "name": "th1", "label": "Temp/Humidity 1", "address": 1, "ok": true,
-      "temperature_c": 26.6, "humidity_pct": 55.9,
+      "name": "sensor_a", "label": "Sensor-A", "address": 1, "ok": true,
+      "temperature_c": 27.5, "humidity_pct": 48.8,
       "errors": 0, "last_error": "",
-      "raw": "01 03 00 00 00 02 C4 0B 01 03 04 02 2F 01 0A 4B D5",
+      "raw": "01 03 00 00 00 02 C4 0B 01 03 04 01 E8 01 13 4B D5",
       "age_s": 0
     }
   ]
 }
 ```
 
-`POST /api/control` returns `{"ok":true}`, or `403` if the output is not
-controllable, `404` if the name is unknown, `400` on missing parameters.
+Temperature and humidity are **omitted** when `ok` is false, so a client can never
+mistake a stale reading for a fresh one.
 
-PowerShell examples:
+`POST /api/control` returns `{"ok":true}`, or `400` (missing arguments), `403`
+(not controllable), `404` (unknown name).
 
 ```powershell
 (Invoke-WebRequest http://192.168.1.109/api/state -UseBasicParsing).Content
@@ -363,57 +348,60 @@ Invoke-WebRequest "http://192.168.1.109/api/control?name=relay1&state=1" -Method
 
 ---
 
-## 4. How-to — build & upload
+## Build &amp; upload
 
-### 4.1 First-time / recovery flash over USB-TTL
+### OTA — the normal path
 
-1. Disconnect mains power from the board.
-2. Wire the adapter to the programming header: `TX`->`RX`, `RX`->`TX`, `GND`->`GND`,
-   `5V`->`5V` (adapter must output 5 V on that pin, 3.3 V logic on TX/RX).
-3. Fit the **IO0 -> GND jumper**.
-4. Press **EN** (or replug) to enter download mode.
-5. Flash:
-   ```powershell
-   pio run -e usb -t upload
-   ```
-6. **Remove the IO0 jumper**, disconnect the adapter, and power the board from
-   230 V AC (or the DC terminal).
-
-While the jumper is on, the board reboots straight back into download mode and
-prints nothing on UART — that is expected, not a fault.
-
-### 4.2 Normal upload — OTA
-
-`[env:ota]` is the default environment, so:
+`[env:ota]` is the default environment:
 
 ```powershell
 pio run -t upload
 ```
 
-Expected output:
-
 ```
-[OTA] firmware.bin  827 KB  ->  http://192.168.1.109
+[OTA] firmware.bin  828 KB  ->  http://192.168.1.109
 [OTA] Step 1: GET /ota/start ...      -> HTTP 200  OK
 [OTA] Step 2: POST /ota/upload ...    -> HTTP 200  OK
 [OTA] Device online after 4s -- upload successful!
 ```
 
-Verify the new build actually took over by bumping `FIRMWARE_VERSION` in
-[include/io_config.h](include/io_config.h) and re-reading `/api/state`.
+Bump `FIRMWARE_VERSION` in [include/config.h](include/config.h) and re-read
+`/api/state` to confirm the new build actually took over.
 
-### 4.3 Serial monitor
+Three update paths exist, all writing to the inactive OTA slot and swapping on
+reboot, so a failed upload leaves the running firmware intact:
+
+1. **ElegantOTA over HTTP** — the default. [scripts/http_ota.py](scripts/http_ota.py)
+   (Python stdlib only) does `GET /ota/start` → `POST /ota/upload` → polls `GET /`
+   until the device answers again. Chosen because it needs no inbound firewall
+   rule, unlike the UDP espota handshake.
+2. **ElegantOTA web UI** — drop `.pio/build/ota/firmware.bin` at `/update`.
+   Handy from a phone.
+3. **ArduinoOTA / espota** — also active on UDP 3232. Switch `[env:ota]` to
+   `upload_protocol = espota`.
+
+`ArduinoOTA.onStart()` forces every valve off before the flash, so no zone can be
+left energised by an interrupted update.
+
+### USB — first flash and recovery
+
+1. Disconnect mains.
+2. Wire the adapter: `TX`↔`RX`, `RX`↔`TX`, `GND`↔`GND`, `5V`↔`5V`.
+3. Fit the **IO0 → GND jumper**.
+4. Press **EN** to enter download mode.
+5. `pio run -e usb -t upload`
+6. Remove the jumper, disconnect the adapter, restore mains power.
+
+While the jumper is fitted the board reboots straight back into download mode and
+prints nothing on UART — expected, not a fault.
 
 ```powershell
-pio device monitor -e usb
+pio device monitor -e usb     # 115200, bench work only
 ```
 
-Only meaningful with the USB-TTL adapter attached — i.e. bench work, not while
-the board runs on mains.
+### Finding the device again
 
-### 4.4 Finding the device IP again
-
-The DHCP lease may change. Look it up by MAC:
+DHCP leases change. Look it up by MAC:
 
 ```powershell
 1..254 | ForEach-Object -Parallel { Test-Connection -Count 1 -TimeoutSeconds 1 -Quiet -TargetName "192.168.1.$_" | Out-Null } -ThrottleLimit 64
@@ -424,72 +412,88 @@ Then update `upload_port` in `[env:ota]`.
 
 ---
 
-## 5. OTA
+## Commissioning (RS485)
 
-Three independent update paths are available. All of them write to the inactive
-OTA app slot and swap on reboot, so a failed upload leaves the running firmware
-intact.
+Every probe ships as address `1`, so a second one must be moved before they can
+share the pair. No USB-RS485 adapter or vendor tool is needed.
 
-### 5.1 ElegantOTA over HTTP (used by `pio run -t upload`)
+1. Disconnect the **A/B wires of every other sensor** — power may stay on. The
+   write reaches whoever answers at `from`, so otherwise they all take the new
+   address.
+2. Confirm the target is alone — one clean frame, no garbage:
+   ```powershell
+   (Invoke-WebRequest "http://192.168.1.109/api/rs485?addr=1" -UseBasicParsing).Content
+   ```
+3. Readdress it:
+   ```powershell
+   Invoke-WebRequest "http://192.168.1.109/api/rs485/setaddr?from=1&to=2" -Method POST -UseBasicParsing
+   ```
+4. A successful write echoes the request back:
+   ```
+   01 06 01 00 00 02 09 F7   <- our TX echo
+   01 06 01 00 00 02 09 F7   <- sensor acknowledgment
+   ```
+5. Verify at `addr=2`, reconnect the others, add the probe to `SENSORS[]`.
 
-- Transport: HTTP on port 80, Basic auth from `include/secrets.h`.
-- Driver: [scripts/http_ota.py](scripts/http_ota.py) — Python stdlib only, no pip
-  packages. PlatformIO calls it as `python scripts/http_ota.py <ip> <firmware.bin>`.
-- Flow:
-  1. `GET /ota/start?mode=firmware&hash=<md5>` — arms the updater.
-  2. `POST /ota/upload` — multipart body, field name `firmware`.
-  3. Poll `GET /` every 2 s (up to 80 s) until the device answers `200` again.
-- Chosen as the default because it needs no inbound firewall rule on the PC,
-  unlike the UDP-based espota flow.
+Two probes on one address produce **corrupted** frames rather than silence — e.g.
+`E0 30 78 FD 60 EC FF`, both drivers fighting on the pair. That fails CRC and
+surfaces as `noframe`.
 
-### 5.2 ElegantOTA web UI
+If nothing answers at all, sweep every baud rate and address:
 
-Browse to `http://192.168.1.109/update`, log in, and drop
-`.pio/build/ota/firmware.bin` on the page. Useful from a phone or another machine.
+```powershell
+$hits = (Invoke-WebRequest "http://192.168.1.109/api/rs485/scan?max=8" -UseBasicParsing -TimeoutSec 90).Content | ConvertFrom-Json
+$hits | Where-Object { $_.raw.Length -gt 23 } | Format-Table baud,addr,raw -AutoSize
+```
 
-### 5.3 ArduinoOTA (espota)
-
-Also active: hostname `Garden-Valve-Relay4`, UDP port 3232, password in `include/secrets.h`.
-Use it by switching `[env:ota]` to `upload_protocol = espota`. Requires the PC
-firewall to allow the inbound UDP handshake.
-
-### 5.4 Safety behaviour
-
-`ArduinoOTA.onStart()` forces every `controllable` output OFF before the flash
-begins, so no valve can be left energised by an interrupted update. Progress is
-printed to serial as `OTA: <n>%`, errors as `OTA Error [<code>]`.
+The filter drops echo-only rows: our own 8-byte frame is 23 characters of hex.
 
 ---
 
-## 6. Troubleshooting
+## Troubleshooting
+
+### Upload
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| `Failed to connect: No serial data received` | Board not in download mode | Fit IO0 jumper, press EN, retry |
-| Upload OK, then no serial output at all | IO0 jumper still fitted — board re-entered download mode | Remove jumper, press EN |
-| Board dies as soon as relays switch | USB-TTL 5 V rail cannot feed the coils | Power from 230 V AC or the DC terminal |
-| Status LED keeps blinking | WiFi not associating | Check SSID/password in `src/wifi_network.cpp`, confirm 2.4 GHz band and signal |
-| `[OTA] FAILED at /ota/start` | Wrong IP, device offline, or wrong Basic auth | Re-check `upload_port`, ping the device, verify credentials |
-| OTA succeeds but version unchanged | `FIRMWARE_VERSION` not bumped | Bump the version string and re-read `/api/state` |
-| Serial garbage | Wrong baud rate | Monitor at 115200 |
-| RS485: `/api/rs485` returns nothing at all | Receiver disabled or `RO`/`DI` swapped | With `RE` tied to GND you must always see the 8-byte echo; if not, the module wiring is wrong |
-| RS485: echo only, never a reply | Sensor not answering — A/B polarity, broken A/B wire, wrong address, or no sensor power | Echo does **not** prove polarity or continuity. Swap yellow/green, check the pair end-to-end, run `/api/rs485/scan` |
-| RS485: one nonsense frame at power-up | Sensor booting mid-transaction | Harmless; CRC rejects it and the next poll is clean |
-| RS485: intermittent garbage like `E0 30 78 FD` | Two sensors sharing one address | Isolate and readdress one, see section 2.7 |
-| Temperature reads ~+6500 °C | Register parsed unsigned | Must be `int16_t` — sub-zero values are two's complement |
+| `Failed to connect: No serial data received` | Not in download mode | Fit the IO0 jumper, press EN, retry |
+| Upload OK, then no serial output at all | IO0 jumper still fitted | Remove it, press EN |
+| Board dies when a relay switches | USB-TTL 5 V cannot feed the coils | Power from mains or the DC terminal |
+| OTA succeeds but version unchanged | `FIRMWARE_VERSION` not bumped | Bump it, re-read `/api/state` |
+| `[OTA] FAILED at /ota/start` | Wrong IP, offline, or bad auth | Check `upload_port`, ping it, verify `secrets.h` |
+
+### RS485
+
+Work down this list — each step rules out one layer.
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `/api/rs485?loopback=1` returns nothing | UART or frame building is broken | The internal loopback bypasses all wiring; a failure here is firmware, not hardware |
+| Loopback fine, but normal probe returns nothing | Receiver disabled, or `RO`/`DI` swapped | With `RE` on GND the 8-byte echo must always appear |
+| Echo only, never a reply | Sensor not answering | Echo proves **neither** A/B polarity **nor** continuity — our driver and receiver agree regardless. Swap yellow/green, check the pair end to end, run the scan |
+| Intermittent garbage like `E0 30 78 FD` | Two probes sharing an address | Isolate and readdress, see [Commissioning](#commissioning-rs485) |
+| One nonsense frame at power-up | Probe booting mid-transaction | Harmless; CRC rejects it and the next poll is clean |
+| Temperature reads ~+6500 °C | Register parsed unsigned | Must be `int16_t` |
+| Spurious bytes on an idle bus | No fail-safe bias | ~680 Ω from `A` to 3.3 V and `B` to GND |
+
+### Other
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| Status LED keeps blinking | Not associating | Check `secrets.h`, confirm 2.4 GHz and signal |
+| Serial garbage | Wrong baud | Monitor at 115200 |
 
 ---
 
-## 7. Status & next steps
+## Status
 
-Working today: WiFi station with reconnect watchdog, dashboard, JSON API, OTA over
-three transports, button-toggled relay 1, and two LY485 temperature/humidity probes
-(addresses 1 and 2) polling cleanly over RS485.
+Working: WiFi with reconnect watchdog, dashboard, JSON API, OTA over three
+transports, button-toggled Valve 1, and two probes (`Sensor-A`, `Sensor-B`)
+polling cleanly over RS485.
 
-Next up:
+Next:
 
-- Sort the 24 VDC -> 24 VAC supply for the Hunter PGV valves (a 24 VAC transformer
-  is the plan).
-- Replace the click-test in [src/logic.cpp](src/logic.cpp) with the real valve
-  schedule/interlock logic, mirroring the rung style used in
+- Fit the 24 V AC transformer for the Hunter PGV valves.
+- Implement the irrigation rules in `runAutomation()`
+  ([src/valve_control.cpp](src/valve_control.cpp)), mirroring the rung style of
   `Garden_IS_ESP32_PLC_14_IO/src/logic.cpp`.

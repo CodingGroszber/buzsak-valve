@@ -2,15 +2,12 @@
 #include <Arduino.h>
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  WIFI — station mode, status LED and ArduinoOTA (UDP 3232)
-//
-//  HTTP services, including the ElegantOTA updater, live in web.cpp.
+//  WEB — dashboard, JSON API and the ElegantOTA updater (HTTP, port 80)
 // ═════════════════════════════════════════════════════════════════════════════
 
-// Connects to WiFi (blocking, blinks the status LED) and starts ArduinoOTA.
-// Call once from setup().
-void wifiSetup();
+// Registers the routes, starts ElegantOTA and the HTTP server.
+// Call once from setup(), after WiFi is up.
+void webSetup();
 
-// Services ArduinoOTA and reconnects if the association drops.
-// Call every loop() pass.
-void wifiLoop();
+// Services pending HTTP requests and the OTA upload. Call every loop() pass.
+void webLoop();

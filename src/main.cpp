@@ -1,62 +1,70 @@
 #include <Arduino.h>
 
+#include "config.h"
 #include "io_config.h"
-#include "wifi_network.h"
-#include "logic.h"
 #include "sensors.h"
+#include "valve_control.h"
+#include "web.h"
+#include "wifi_network.h"
 
-// ═════════════════════════════════════════════════════════════
-//  IO LAYOUT — Edit here to add/remove relays
-// ═════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════════════════
+//  GARDEN VALVE CONTROL — ESP32-ACDC-RELAY4-M
+//
+//  This file is the wiring diagram of the firmware: it declares what hardware
+//  exists and the order the modules run in. Behaviour lives in the modules:
+//
+//      valve_control.cpp   relay switching, button, automation rungs
+//      sensors.cpp         RS485 Modbus RTU master
+//      wifi_network.cpp    WiFi association + ArduinoOTA
+//      web.cpp             dashboard, JSON API, ElegantOTA
+//
+//  Constants belong in config.h. Adding hardware means editing the two tables
+//  below and nothing else.
+// ═════════════════════════════════════════════════════════════════════════════
 
-// ── OUTPUTS ───────────────────────────────────────────────────
+// ── Outputs ──────────────────────────────────────────────────────────────────
+// controllable=false keeps an entry visible on the dashboard while excluding it
+// from the API, the button and the click-test — used for the status LED, which
+// the WiFi module drives.
 IOOutput OUTPUTS[] = {
-    {"relay1", "Relay 1", 32, true},
-    {"relay2", "Relay 2", 33, true},
-    {"relay3", "Relay 3", 25, true},
-    {"relay4", "Relay 4", 26, true},
-    {"status_led", "Status LED", 23, false},
+    {"relay1", "Valve 1", RELAY_1_PIN, true},
+    {"relay2", "Valve 2", RELAY_2_PIN, true},
+    {"relay3", "Valve 3", RELAY_3_PIN, true},
+    {"relay4", "Valve 4", RELAY_4_PIN, true},
+    {"status_led", "Status LED", STATUS_LED_PIN, false},
 };
 
 const int NUM_OUTPUTS = sizeof(OUTPUTS) / sizeof(OUTPUTS[0]);
 
-// ── RS485 SENSORS ───────────────────────────────────────
+// ── RS485 probes ─────────────────────────────────────────────────────────────
+// Addresses must be unique: the probes ship as address 1, and two answering at
+// once corrupt each other's frames. See README section 2.7 for readdressing.
 IOSensor SENSORS[] = {
-    {"th1", "Temp/Humidity 1", 1},
-    {"th2", "Temp/Humidity 2", 2},
+    {"sensor_a", "Sensor-A", 1},
+    {"sensor_b", "Sensor-B", 2},
 };
 
 const int NUM_SENSORS = sizeof(SENSORS) / sizeof(SENSORS[0]);
-
-// ── WiFi LED helper ───────────────────────────────────────────
-int wifiLedIndex()
-{
-    for (int i = 0; i < NUM_OUTPUTS; i++)
-        if (String(OUTPUTS[i].name) == "status_led")
-            return i;
-    return -1;
-}
 
 void setup()
 {
     Serial.begin(115200);
 
-    // Initialise all outputs — relays start de-energised
-    for (int i = 0; i < NUM_OUTPUTS; i++)
-    {
-        pinMode(OUTPUTS[i].pin, OUTPUT);
-        digitalWrite(OUTPUTS[i].pin, LOW);
-    }
+    // Valves first: this drives every relay low, so a reset can never leave a
+    // valve energised while the network is still coming up.
+    valveControlSetup();
 
-    setupNetwork();
-    logicSetup();
+    wifiSetup(); // blocks until associated
+    webSetup();
     sensorsSetup();
 }
 
 void loop()
 {
-    loopNetwork(); // OTA + HTTP + WiFi watchdog
-    logicLoop();   // button + relay click-test (RELAY_TEST_ENABLED)
-    sensorsLoop(); // RS485 Modbus polling
-    delay(50);     // 50 ms scan cycle
+    wifiLoop();          // ArduinoOTA + association watchdog
+    webLoop();           // HTTP requests + ElegantOTA
+    valveControlLoop();  // button + automation rungs
+    sensorsLoop();       // RS485 polling state machine
+
+    delay(SCAN_CYCLE_MS);
 }
