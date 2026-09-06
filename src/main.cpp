@@ -61,10 +61,10 @@ void setup()
 
 void loop()
 {
-    wifiLoop();          // ArduinoOTA + association watchdog
-    webLoop();           // HTTP requests + ElegantOTA
-    valveControlLoop();  // button + automation rungs
-    sensorsLoop();       // RS485 polling state machine
+    wifiLoop();         // ArduinoOTA + association watchdog
+    webLoop();          // HTTP requests + ElegantOTA
+    valveControlLoop(); // button + automation rungs
+    sensorsLoop();      // RS485 polling state machine
 
     delay(SCAN_CYCLE_MS);
 }
