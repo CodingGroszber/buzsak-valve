@@ -91,8 +91,9 @@ path — ESP32 -> `DI` -> driver -> A/B -> receiver -> `RO`. If the echo disappe
 the transceiver or its wiring is at fault, not the sensor.
 
 Bus rules: daisy-chain (never star), twisted pair for A/B, and each sensor needs a
-**unique Modbus address** — they all ship as address `1`. Set them one at a time
-with `LY485Tools（EN）.exe` before paralleling them.
+**unique Modbus address** — they all ship as address `1`. Two probes are fitted,
+at addresses `1` and `2`; see section 2.7 for how to readdress one over the bus
+without the vendor Windows tool.
 
 ---
 
@@ -249,6 +250,7 @@ Adding a probe is a one-line edit to `SENSORS[]` in [src/main.cpp](src/main.cpp)
 ```cpp
 IOSensor SENSORS[] = {
     {"th1", "Temp/Humidity 1", 1},   // name, label, Modbus slave address
+    {"th2", "Temp/Humidity 2", 2},
 };
 ```
 
@@ -259,6 +261,28 @@ assuming a fixed offset, which is what lets it ignore the TX echo.
 
 Each reading carries `ok`, `errors`, `last_error` and the raw hex of the last RX
 buffer, so a misbehaving bus can be diagnosed entirely over HTTP.
+
+#### Readdressing a probe over the bus
+
+Every probe ships as address `1`, so a second one must be moved before they can
+share the pair. No USB-RS485 adapter or vendor tool is needed — `POST
+/api/rs485/setaddr` writes register `0x0100` with function `0x06`:
+
+1. Disconnect the **A/B wires of every other sensor** (power may stay on). The
+   write is broadcast to whoever answers at `from`, so all of them would take the
+   new address.
+2. Confirm the target is alone: `GET /api/rs485?addr=1` must return one clean frame.
+3. `POST /api/rs485/setaddr?from=1&to=2`
+4. A successful write echoes the request back:
+   ```
+   01 06 01 00 00 02 09 F7   <- our TX echo
+   01 06 01 00 00 02 09 F7   <- sensor acknowledgment
+   ```
+5. Verify with `GET /api/rs485?addr=2`, reconnect the other sensors, and add the
+   probe to `SENSORS[]`.
+
+Two probes answering on the same address produce corrupted frames rather than
+silence — e.g. `E0 30 78 FD 60 EC FF`, which fails CRC and shows up as `noframe`.
 
 ### 2.8 Build flags
 
@@ -299,6 +323,7 @@ Base URL: `http://192.168.1.109`
 | POST | `/api/control?name=<key>&state=<0/1>` | none | Set one controllable output |
 | GET | `/api/rs485?addr=N[&loopback=1]` | none | Bring-up probe — one blocking Modbus read, returns the raw RX bytes |
 | GET | `/api/rs485/scan?max=N` | none | Sweeps every baud rate against addresses 1..N (blocking, ~12 s) |
+| POST | `/api/rs485/setaddr?from=A&to=B` | none | Changes a probe's Modbus address — only with a single sensor on the bus |
 | GET | `/update` | Basic | ElegantOTA web updater |
 | GET | `/ota/start?mode=firmware&hash=<md5>` | Basic | ElegantOTA handshake |
 | POST | `/ota/upload` | Basic | ElegantOTA multipart firmware upload |
@@ -450,6 +475,7 @@ printed to serial as `OTA: <n>%`, errors as `OTA Error [<code>]`.
 | RS485: `/api/rs485` returns nothing at all | Receiver disabled or `RO`/`DI` swapped | With `RE` tied to GND you must always see the 8-byte echo; if not, the module wiring is wrong |
 | RS485: echo only, never a reply | Sensor not answering — A/B polarity, broken A/B wire, wrong address, or no sensor power | Echo does **not** prove polarity or continuity. Swap yellow/green, check the pair end-to-end, run `/api/rs485/scan` |
 | RS485: one nonsense frame at power-up | Sensor booting mid-transaction | Harmless; CRC rejects it and the next poll is clean |
+| RS485: intermittent garbage like `E0 30 78 FD` | Two sensors sharing one address | Isolate and readdress one, see section 2.7 |
 | Temperature reads ~+6500 °C | Register parsed unsigned | Must be `int16_t` — sub-zero values are two's complement |
 
 ---
@@ -457,12 +483,11 @@ printed to serial as `OTA: <n>%`, errors as `OTA Error [<code>]`.
 ## 7. Status & next steps
 
 Working today: WiFi station with reconnect watchdog, dashboard, JSON API, OTA over
-three transports, button-toggled relay 1, and one LY485 temperature/humidity probe
-polling cleanly over RS485 (0 errors over sustained runs).
+three transports, button-toggled relay 1, and two LY485 temperature/humidity probes
+(addresses 1 and 2) polling cleanly over RS485.
 
 Next up:
 
-- Set the second probe to address `2` and add it to `SENSORS[]`.
 - Sort the 24 VDC -> 24 VAC supply for the Hunter PGV valves (a 24 VAC transformer
   is the plan).
 - Replace the click-test in [src/logic.cpp](src/logic.cpp) with the real valve

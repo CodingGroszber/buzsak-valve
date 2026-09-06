@@ -186,6 +186,25 @@ static void handleApiRs485Scan()
     server.send(200, "application/json", rs485Scan(maxAddr));
 }
 
+// ── POST /api/rs485/setaddr?from=1&to=2 ─ readdress a probe ──────────
+// Only safe with a single sensor on the bus.
+static void handleApiRs485SetAddr()
+{
+    uint8_t from = server.arg("from").toInt();
+    uint8_t to = server.arg("to").toInt();
+    if (from < 1 || to < 1 || to > 247)
+    {
+        server.send(400, "application/json", "{\"ok\":false,\"error\":\"from/to out of range\"}");
+        return;
+    }
+
+    String hex = rs485SetAddress(from, to);
+    Serial.printf("[485] set address %u -> %u [%s]\n", from, to, hex.c_str());
+    server.send(200, "application/json",
+                "{\"from\":" + String(from) + ",\"to\":" + String(to) +
+                    ",\"raw\":\"" + hex + "\"}");
+}
+
 // ── Network setup (called once from main setup()) ─────────────
 void setupNetwork()
 {
@@ -214,6 +233,7 @@ void setupNetwork()
     server.on("/api/control", HTTP_POST, handleApiControl);
     server.on("/api/rs485", HTTP_GET, handleApiRs485);
     server.on("/api/rs485/scan", HTTP_GET, handleApiRs485Scan);
+    server.on("/api/rs485/setaddr", HTTP_POST, handleApiRs485SetAddr);
 
     ElegantOTA.setAuth(OTA_HTTP_USER, OTA_HTTP_PASS);
     ElegantOTA.begin(&server);

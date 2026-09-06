@@ -28,3 +28,7 @@ String rs485Probe(uint8_t address, bool loopback = false);
 // Sweeps every supported baud rate against addresses 1..maxAddr and reports
 // anything that answers. Blocking, takes several seconds. Returns a JSON array.
 String rs485Scan(uint8_t maxAddr);
+
+// Writes register 0x0100 to change a probe's Modbus address (function 0x06).
+// Only one sensor may be on the bus, or they will all take the new address.
+String rs485SetAddress(uint8_t from, uint8_t to);

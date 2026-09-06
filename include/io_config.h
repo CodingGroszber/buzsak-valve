@@ -2,7 +2,7 @@
 #include <Arduino.h>
 
 // ── Firmware version ─────────────────────────────────────────
-#define FIRMWARE_VERSION "v0.5"
+#define FIRMWARE_VERSION "v0.7"
 
 // ═════════════════════════════════════════════════════════════
 //  IO CONFIGURATION — shared types and extern declarations

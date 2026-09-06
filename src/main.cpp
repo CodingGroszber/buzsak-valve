@@ -23,6 +23,7 @@ const int NUM_OUTPUTS = sizeof(OUTPUTS) / sizeof(OUTPUTS[0]);
 // ── RS485 SENSORS ───────────────────────────────────────
 IOSensor SENSORS[] = {
     {"th1", "Temp/Humidity 1", 1},
+    {"th2", "Temp/Humidity 2", 2},
 };
 
 const int NUM_SENSORS = sizeof(SENSORS) / sizeof(SENSORS[0]);

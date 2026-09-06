@@ -7,7 +7,9 @@
 // Only function 0x03 is used. Registers 0x0000 = humidity x10 (unsigned),
 // 0x0001 = temperature x10 (signed, two's complement).
 static const uint8_t MODBUS_READ_HOLDING = 0x03;
+static const uint8_t MODBUS_WRITE_SINGLE = 0x06;
 static const uint16_t REG_HUMIDITY = 0x0000;
+static const uint16_t REG_ADDRESS = 0x0100;
 static const uint16_t REG_COUNT = 2;
 
 static const uint32_t POLL_INTERVAL_MS = 5000;
@@ -76,15 +78,8 @@ namespace
         }
     }
 
-    void sendReadRequest(uint8_t address)
+    void sendFrame(uint8_t *frame)
     {
-        uint8_t frame[8];
-        frame[0] = address;
-        frame[1] = MODBUS_READ_HOLDING;
-        frame[2] = REG_HUMIDITY >> 8;
-        frame[3] = REG_HUMIDITY & 0xFF;
-        frame[4] = REG_COUNT >> 8;
-        frame[5] = REG_COUNT & 0xFF;
         uint16_t crc = crc16(frame, 6);
         frame[6] = crc & 0xFF;
         frame[7] = crc >> 8;
@@ -93,12 +88,20 @@ namespace
             Serial2.read();
 
         digitalWrite(RS485_DE_PIN, HIGH);
-        Serial2.write(frame, sizeof(frame));
+        Serial2.write(frame, 8);
         Serial2.flush(); // must not release DE before the last bit is out
         digitalWrite(RS485_DE_PIN, LOW);
 
         rxLen = 0;
         requestSentMs = millis();
+    }
+
+    void sendReadRequest(uint8_t address)
+    {
+        uint8_t frame[8] = {address, MODBUS_READ_HOLDING,
+                            REG_HUMIDITY >> 8, REG_HUMIDITY & 0xFF,
+                            REG_COUNT >> 8, REG_COUNT & 0xFF, 0, 0};
+        sendFrame(frame);
     }
 
     void failCurrent(const char *reason)
@@ -248,4 +251,19 @@ String rs485Scan(uint8_t maxAddr)
     state = POLL_IDLE;
     lastPollMs = millis();
     return out;
+}
+
+String rs485SetAddress(uint8_t from, uint8_t to)
+{
+    uint8_t frame[8] = {from, MODBUS_WRITE_SINGLE,
+                        REG_ADDRESS >> 8, REG_ADDRESS & 0xFF,
+                        0x00, to, 0, 0};
+    sendFrame(frame);
+    collectResponse(RESPONSE_TIMEOUT_MS);
+
+    String hex = hexDump();
+
+    state = POLL_IDLE;
+    lastPollMs = millis();
+    return hex;
 }
