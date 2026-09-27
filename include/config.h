@@ -12,7 +12,7 @@
 // ═════════════════════════════════════════════════════════════════════════════
 
 // ── Firmware identity ────────────────────────────────────────────────────────
-#define FIRMWARE_VERSION "v0.8"
+#define FIRMWARE_VERSION "v0.9"
 
 // ── Relay outputs ────────────────────────────────────────────────────────────
 // The coils are driven through a darlington array, so a HIGH on the GPIO
@@ -94,3 +94,9 @@ constexpr uint8_t RS485_SCAN_DEFAULT_MAX_ADDR = 8;
 // ── Web server ───────────────────────────────────────────────────────────────
 constexpr uint16_t HTTP_PORT = 80;
 constexpr uint32_t DASHBOARD_REFRESH_MS = 2000;
+
+// ── Control mode ─────────────────────────────────────────────────────────────
+// Mode after a reset. AUTOMATIC is the normal operating state, so an unattended
+// controller resumes irrigating after a power cut rather than waiting for
+// someone to notice it came back up in manual.
+constexpr bool BOOT_IN_AUTOMATIC_MODE = true;

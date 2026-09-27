@@ -24,6 +24,8 @@
 
 namespace
 {
+    ControlMode mode = BOOT_IN_AUTOMATIC_MODE ? MODE_AUTOMATIC : MODE_MANUAL;
+
     uint32_t lastButtonMs = 0;
     bool buttonWasDown = false;
 
@@ -112,6 +114,13 @@ namespace
         restartCycle();
         Serial.println("[BTN] all relays OFF, click-test restarted");
 #else
+        // Ignored in automatic mode: a press must not fight the automation.
+        if (mode != MODE_MANUAL)
+        {
+            Serial.println("[BTN] ignored - controller is in automatic mode");
+            return;
+        }
+
         int idx = firstRelayIndex();
         if (idx < 0)
             return;
@@ -159,7 +168,34 @@ void valveControlLoop()
     relayCycleLoop(now);
 #endif
 
-    runAutomation();
+    // Automation only owns the valves in automatic mode; in manual the operator
+    // does, and the rungs stay out of the way entirely.
+    if (mode == MODE_AUTOMATIC)
+        runAutomation();
+}
+
+ControlMode controlMode()
+{
+    return mode;
+}
+
+const char *controlModeName()
+{
+    return mode == MODE_MANUAL ? "manual" : "automatic";
+}
+
+void setControlMode(ControlMode next)
+{
+    if (next == mode)
+        return;
+
+    mode = next;
+
+    // Closing on every handover keeps the two owners from inheriting each
+    // other's state: manual must not start with whatever the rungs left open,
+    // and the automation must not silently adopt a manual override.
+    setAllRelays(RELAY_OFF);
+    Serial.printf("[MODE] %s - all valves closed\n", controlModeName());
 }
 
 void valveSet(int outputIndex, bool on)

@@ -38,20 +38,34 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
 <title>Garden Valve Control</title>
 <style>
 body{font-family:system-ui,sans-serif;background:#111;color:#eee;margin:0;padding:1.5rem;max-width:34rem}
-h1{font-size:1.25rem;margin:0 0 1.25rem}
+h1{font-size:1.25rem;margin:0 0 1rem}
 h2{font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:#888;margin:1.5rem 0 .25rem}
 .row{display:flex;align-items:center;gap:.75rem;padding:.6rem 0;border-bottom:1px solid #2a2a2a}
 .dot{width:.9rem;height:.9rem;border-radius:50%;background:#444;flex:none}
-.on{background:#3c3}
+.on{background:#3c3;box-shadow:0 0 .5rem #3c3}
 .bad{background:#c33}
 .name{flex:1}
 .val{font-variant-numeric:tabular-nums;color:#bbb}
+.val.open{color:#5d5;font-weight:600}
+.val.shut{color:#777}
 button{background:#2a2a2a;color:#eee;border:1px solid #555;border-radius:.3rem;padding:.4rem .9rem;cursor:pointer}
-button:hover{background:#3a3a3a}
+button:hover{filter:brightness(1.25)}
+button.open{background:#14361f;border-color:#2e9e4b;color:#7ede97}
+button.close{background:#4a1a1a;border-color:#c33;color:#f59a9a}
+.seg{display:flex;border:1px solid #555;border-radius:.4rem;overflow:hidden;width:fit-content}
+.seg button{border:0;border-radius:0;background:#1c1c1c;color:#777;font-weight:600;letter-spacing:.06em;padding:.55rem 1.5rem}
+.seg button.act-man{background:#d8891f;color:#111}
+.seg button.act-auto{background:#2e9e4b;color:#fff}
+#hint{font-size:.8rem;color:#999;margin:.6rem 0 0}
 footer{margin-top:1.75rem;font-size:.8rem;color:#888}
 a{color:#6af}
 </style></head><body>
 <h1>Garden Valve Control</h1>
+<div class="seg">
+  <button id="m-man" onclick="setMode('manual')">MANUAL</button>
+  <button id="m-auto" onclick="setMode('automatic')">AUTOMATIC</button>
+</div>
+<p id="hint"></p>
 <h2>Valves</h2>
 <div id="outputs">loading...</div>
 <h2>Sensors</h2>
@@ -60,12 +74,22 @@ a{color:#6af}
 <script>
 async function refresh(){
   const s=await (await fetch('/api/state')).json();
-  document.getElementById('fw').textContent=s.firmware+' @ '+s.ip;
+  const manual=(s.mode==='manual');
 
-  document.getElementById('outputs').innerHTML=s.outputs.map(o=>
-    `<div class="row"><div class="dot ${o.state?'on':''}"></div><div class="name">${o.label}</div>`+
-    (o.controllable?`<button onclick="set('${o.name}',${o.state?0:1})">${o.state?'OFF':'ON'}</button>`:'')+
-    `</div>`).join('');
+  document.getElementById('fw').textContent=s.firmware+' @ '+s.ip;
+  document.getElementById('m-man').className=manual?'act-man':'';
+  document.getElementById('m-auto').className=manual?'':'act-auto';
+  document.getElementById('hint').textContent=manual
+    ? 'Manual override - valves are operated from this page, automation suspended.'
+    : 'Automation in control - switch to MANUAL to operate valves by hand.';
+
+  document.getElementById('outputs').innerHTML=s.outputs.map(o=>{
+    const label=o.controllable?(o.state?'OPEN':'CLOSED'):(o.state?'ON':'OFF');
+    const ctrl=(o.controllable&&manual)
+      ? `<button class="${o.state?'close':'open'}" onclick="set('${o.name}',${o.state?0:1})">${o.state?'CLOSE':'OPEN'}</button>`
+      : `<div class="val ${o.state?'open':'shut'}">${label}</div>`;
+    return `<div class="row"><div class="dot ${o.state?'on':''}"></div><div class="name">${o.label}</div>${ctrl}</div>`;
+  }).join('');
 
   document.getElementById('sensors').innerHTML=(s.sensors||[]).map(x=>
     `<div class="row"><div class="dot ${x.ok?'on':'bad'}"></div><div class="name">${x.label}</div>`+
@@ -74,6 +98,10 @@ async function refresh(){
 }
 async function set(name,state){
   await fetch('/api/control?name='+name+'&state='+state,{method:'POST'});
+  refresh();
+}
+async function setMode(m){
+  await fetch('/api/mode?value='+m,{method:'POST'});
   refresh();
 }
 refresh();setInterval(refresh,REFRESH_MS);
@@ -101,6 +129,7 @@ namespace
         String json = "{";
         json += "\"firmware\":\"" + String(FIRMWARE_VERSION) + "\",";
         json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
+        json += "\"mode\":\"" + String(controlModeName()) + "\",";
 
         json += "\"outputs\":[";
         for (int i = 0; i < NUM_OUTPUTS; i++)
@@ -172,8 +201,37 @@ namespace
             return;
         }
 
+        // Refused rather than silently overridden on the next automation pass,
+        // which would look like the command was lost.
+        if (controlMode() != MODE_MANUAL)
+        {
+            server.send(409, "application/json",
+                        "{\"ok\":false,\"error\":\"Controller is in automatic mode\"}");
+            return;
+        }
+
         valveSet(index, stateArg == "1" || stateArg == "true");
         server.send(200, "application/json", "{\"ok\":true}");
+    }
+
+    // ── POST /api/mode?value=manual|automatic ─────────────────────────
+    void handleApiMode()
+    {
+        String value = server.arg("value");
+
+        if (value == "manual")
+            setControlMode(MODE_MANUAL);
+        else if (value == "automatic")
+            setControlMode(MODE_AUTOMATIC);
+        else
+        {
+            server.send(400, "application/json",
+                        "{\"ok\":false,\"error\":\"value must be manual or automatic\"}");
+            return;
+        }
+
+        server.send(200, "application/json",
+                    "{\"ok\":true,\"mode\":\"" + String(controlModeName()) + "\"}");
     }
 
     // ── GET /api/rs485?addr=N[&loopback=1] ───────────────────────────────────
@@ -231,6 +289,7 @@ void webSetup()
     server.on("/", HTTP_GET, handleRoot);
     server.on("/api/state", HTTP_GET, handleApiState);
     server.on("/api/control", HTTP_POST, handleApiControl);
+    server.on("/api/mode", HTTP_POST, handleApiMode);
     server.on("/api/rs485", HTTP_GET, handleApiRs485);
     server.on("/api/rs485/scan", HTTP_GET, handleApiRs485Scan);
     server.on("/api/rs485/setaddr", HTTP_POST, handleApiRs485SetAddr);

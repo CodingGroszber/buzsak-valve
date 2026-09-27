@@ -198,13 +198,28 @@ from the API, the button and the click-test — used for the status LED.
 
 ### Valve control
 
+The controller is always in one of two modes, selected from the switch at the top
+of the dashboard:
+
+| Mode | Colour | Behaviour |
+| --- | --- | --- |
+| **AUTOMATIC** | green | `runAutomation()` owns the valves. Manual commands are refused with `409`, and the dashboard shows states as read-only text |
+| **MANUAL** | amber | The automation is suspended and each valve gets an OPEN/CLOSE button |
+
+**Every mode change closes all valves first.** Neither owner inherits the other's
+state: manual does not start with whatever the rungs left open, and the
+automation does not silently adopt a manual override. A reset returns to
+AUTOMATIC (`BOOT_IN_AUTOMATIC_MODE`), so an unattended controller resumes after a
+power cut instead of waiting in manual for someone to notice.
+
 Every relay write goes through `valveSet()`. Interlocks added there apply to the
 API, the button and the automation at once — the natural home for a future
 "one zone at a time" rule or a minimum gap between switching operations.
 
-**Button (GPIO0)** — debounced 50 ms falling edge, always active:
+**Button (GPIO0)** — debounced 50 ms falling edge:
 
-- normally: toggles the first controllable output (Valve 1)
+- in MANUAL: toggles the first controllable output (Valve 1)
+- in AUTOMATIC: ignored, so a press cannot fight the automation
 - with `RELAY_TEST_ENABLED=1`: drops all relays and restarts the click-test
 
 > [!WARNING]
@@ -305,8 +320,9 @@ Base URL `http://192.168.1.109`.
 | Method | Path | Description |
 | --- | --- | --- |
 | GET | `/` | Dashboard, refreshes every 2 s |
-| GET | `/api/state` | Firmware, IP, relays and sensor readings |
-| POST | `/api/control?name=<key>&state=<0\|1>` | Switch one controllable output |
+| GET | `/api/state` | Firmware, IP, mode, relays and sensor readings |
+| POST | `/api/control?name=<key>&state=<0\|1>` | Switch one controllable output — **MANUAL mode only** |
+| POST | `/api/mode?value=<manual\|automatic>` | Switch control mode, closing all valves |
 | GET | `/api/rs485?addr=N[&loopback=1]` | Bus probe, returns raw bytes |
 | GET | `/api/rs485/scan?max=N` | Baud/address sweep (blocking, ~12 s) |
 | POST | `/api/rs485/setaddr?from=A&to=B` | Readdress a probe — one sensor only |
@@ -316,8 +332,9 @@ Base URL `http://192.168.1.109`.
 
 ```json
 {
-  "firmware": "v0.8",
+  "firmware": "v0.9",
   "ip": "192.168.1.109",
+  "mode": "automatic",
   "outputs": [
     { "name": "relay1", "label": "Valve 1", "state": false, "controllable": true },
     { "name": "status_led", "label": "Status LED", "state": true, "controllable": false }
@@ -338,7 +355,7 @@ Temperature and humidity are **omitted** when `ok` is false, so a client can nev
 mistake a stale reading for a fresh one.
 
 `POST /api/control` returns `{"ok":true}`, or `400` (missing arguments), `403`
-(not controllable), `404` (unknown name).
+(not controllable), `404` (unknown name), `409` (controller is in automatic mode).
 
 ```powershell
 (Invoke-WebRequest http://192.168.1.109/api/state -UseBasicParsing).Content
