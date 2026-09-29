@@ -5,6 +5,7 @@
 
 #include "config.h"
 #include "io_config.h"
+#include "humidity_control.h"
 #include "secrets.h"
 #include "sensors.h"
 #include "valve_control.h"
@@ -68,6 +69,10 @@ a{color:#6af}
 <p id="hint"></p>
 <h2>Valves</h2>
 <div id="outputs">loading...</div>
+<div id="automation" style="display:none">
+<h2>Automation</h2>
+<div id="auto-info"></div>
+</div>
 <h2>Sensors</h2>
 <div id="sensors"></div>
 <footer><span id="fw"></span> &middot; <a href="/update">OTA update</a></footer>
@@ -84,17 +89,42 @@ async function refresh(){
     : 'Automation in control - switch to MANUAL to operate valves by hand.';
 
   document.getElementById('outputs').innerHTML=s.outputs.map(o=>{
+    // Buttons always show the *current* state - CLOSED at rest, OPEN once
+    // pressed - never the action a click would perform.
     const label=o.controllable?(o.state?'OPEN':'CLOSED'):(o.state?'ON':'OFF');
     const ctrl=(o.controllable&&manual)
-      ? `<button class="${o.state?'close':'open'}" onclick="set('${o.name}',${o.state?0:1})">${o.state?'CLOSE':'OPEN'}</button>`
+      ? `<button class="${o.state?'open':'close'}" onclick="set('${o.name}',${o.state?0:1})">${label}</button>`
       : `<div class="val ${o.state?'open':'shut'}">${label}</div>`;
-    return `<div class="row"><div class="dot ${o.state?'on':''}"></div><div class="name">${o.label}</div>${ctrl}</div>`;
+    // The automation-controlled valve also shows its duty cycle, converted to
+    // a run length in minutes, with an emoji giving an at-a-glance sense of
+    // how wet the current cycle is.
+    let duty='';
+    if(s.automation&&o.name===s.automation.valve){
+      const mins=s.automation.duty*s.automation.period_s/60;
+      const minsText=(mins>0&&mins<1)?mins.toFixed(1):Math.round(mins);
+      const emoji=s.automation.duty<=0?'🌵':s.automation.duty<=0.25?'💧':s.automation.duty<=0.5?'💦':s.automation.duty<=0.75?'🌧':'🌊';
+      duty=`<div class="val duty">${minsText}m ${emoji}</div>`;
+    }
+    return `<div class="row"><div class="dot ${o.state?'on':''}"></div><div class="name">${o.label}</div>${duty}${ctrl}</div>`;
   }).join('');
 
   document.getElementById('sensors').innerHTML=(s.sensors||[]).map(x=>
     `<div class="row"><div class="dot ${x.ok?'on':'bad'}"></div><div class="name">${x.label}</div>`+
     `<div class="val">${x.ok?x.temperature_c.toFixed(1)+' &deg;C &nbsp; '+x.humidity_pct.toFixed(1)+' %RH'
                         :(x.last_error||'no data')}</div></div>`).join('');
+
+  const a=s.automation;
+  document.getElementById('automation').style.display=manual?'none':'block';
+  if(a&&!manual){
+    const remain=Math.max(0,a.period_s-a.elapsed_s);
+    document.getElementById('auto-info').innerHTML=
+      `<div class="row"><div class="dot ${a.valve_on?'on':''}"></div><div class="name">Mist valve</div>`+
+      `<div class="val">${a.valve_on?'MISTING':'idle'}</div></div>`+
+      `<div class="row"><div class="name">Target / duty cycle</div>`+
+      `<div class="val">${a.target_pct.toFixed(0)}% RH &nbsp; @ &nbsp; ${(a.duty*100).toFixed(0)}%</div></div>`+
+      `<div class="row"><div class="name">Next cycle in</div><div class="val">${remain}s`+
+      `${a.time_synced?'':' (clock not synced yet)'}</div></div>`;
+  }
 }
 async function set(name,state){
   await fetch('/api/control?name='+name+'&state='+state,{method:'POST'});
@@ -168,7 +198,18 @@ namespace
             json += "\"raw\":\"" + String(reading.lastRaw) + "\",";
             json += "\"age_s\":" + String(reading.lastOkMs ? (millis() - reading.lastOkMs) / 1000 : 0) + "}";
         }
-        json += "]";
+        json += "],";
+
+        HumidityControlStatus automation = humidityControlStatus();
+        json += "\"automation\":{";
+        json += "\"valve\":\"" + String(HUMIDITY_VALVE_NAME) + "\",";
+        json += "\"target_pct\":" + String(automation.targetPct, 1) + ",";
+        json += "\"duty\":" + String(automation.dutyCycle, 3) + ",";
+        json += "\"valve_on\":" + String(automation.valveOn ? "true" : "false") + ",";
+        json += "\"period_s\":" + String(automation.periodS) + ",";
+        json += "\"elapsed_s\":" + String(automation.elapsedS) + ",";
+        json += "\"sensor_valid\":" + String(automation.sensorValid ? "true" : "false") + ",";
+        json += "\"time_synced\":" + String(automation.timeSynced ? "true" : "false") + "}";
 
         json += "}";
         server.send(200, "application/json", json);

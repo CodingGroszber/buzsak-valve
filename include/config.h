@@ -1,5 +1,6 @@
 #pragma once
 #include <Arduino.h>
+#include <time.h>
 
 // ═════════════════════════════════════════════════════════════════════════════
 //  CENTRAL CONFIGURATION
@@ -100,3 +101,31 @@ constexpr uint32_t DASHBOARD_REFRESH_MS = 2000;
 // controller resumes irrigating after a power cut rather than waiting for
 // someone to notice it came back up in manual.
 constexpr bool BOOT_IN_AUTOMATIC_MODE = true;
+
+// ── Time sync (NTP) ──────────────────────────────────────────────────────────
+// The humidity automation aligns its periods to the wall clock, so the ESP32
+// needs a real notion of time. POSIX TZ rule for Europe/Budapest, DST handled
+// automatically (last Sunday of March/October).
+constexpr const char *BUDAPEST_TZ = "CET-1CEST,M3.5.0,M10.5.0/3";
+constexpr const char *NTP_SERVER_1 = "pool.ntp.org";
+constexpr const char *NTP_SERVER_2 = "time.google.com";
+// Epoch of 2024-01-01T00:00:00Z: time() below this means NTP has not answered
+// yet, since the RTC otherwise boots at 1970.
+constexpr time_t MIN_VALID_EPOCH = 1704067200;
+
+// ── Humidity automation ──────────────────────────────────────────────────────
+// See humidity_control.cpp for the control algorithm. The mist valve (relay1)
+// is time-proportioned like a slow PWM: each period it runs for duty*period,
+// starting at the period boundary, then stays shut for the remainder.
+constexpr const char *HUMIDITY_VALVE_NAME = "relay1"; // the MIST valve
+constexpr int HUMIDITY_SENSOR_INDEX = 0;              // SENSORS[0], "sensor_a"
+constexpr float HUMIDITY_TARGET_PCT = 70.0f;
+constexpr uint32_t HUMIDITY_PERIOD_S = 10 * 60; // period + PWM base, wall-clock aligned
+// Duty increases by (deficit_%RH * gain) each period, capped at max-step so a
+// single stale/low reading (the probe lags 1-5 min behind the real air state
+// in its IP67 case) cannot slam the valve to full duty in one jump.
+constexpr float HUMIDITY_DUTY_GAIN = 0.05f;
+constexpr float HUMIDITY_DUTY_MAX_STEP = 0.25f;
+// The process only ever adds moisture, so once the target is reached or beaten
+// the cheapest way to save water is to cut the valve immediately rather than
+// ramp it down - there is no equivalent "too wet" actuator to fight with.

@@ -139,18 +139,19 @@ Each `.cpp`/`.h` pair is one subsystem, split by responsibility rather than by
 convenience:
 
 ```
-src/main.cpp            hardware inventory (OUTPUTS[], SENSORS[]) + setup/loop
-src/valve_control.cpp   relay switching, button, automation rungs
-src/sensors.cpp         RS485 Modbus RTU master
-src/wifi_network.cpp    WiFi association + ArduinoOTA (UDP)
-src/web.cpp             dashboard, JSON API, ElegantOTA (HTTP)
+src/main.cpp             hardware inventory (OUTPUTS[], SENSORS[]) + setup/loop
+src/valve_control.cpp    relay switching, button, mode handover, automation rungs
+src/humidity_control.cpp RH PWM duty-cycle controller for the mist valve
+src/sensors.cpp          RS485 Modbus RTU master
+src/wifi_network.cpp     WiFi association + ArduinoOTA (UDP) + NTP time sync
+src/web.cpp              dashboard, JSON API, ElegantOTA (HTTP)
 
-include/config.h        every tunable constant in the project
-include/io_config.h     IOOutput / IOSensor types, extern tables
-include/secrets.h       WiFi + OTA credentials (gitignored)
+include/config.h         every tunable constant in the project
+include/io_config.h      IOOutput / IOSensor types, extern tables
+include/secrets.h        WiFi + OTA credentials (gitignored)
 
-scripts/http_ota.py     stdlib-only ElegantOTA uploader
-docs/manual.md          OCR of the LY485 protocol manual
+scripts/http_ota.py      stdlib-only ElegantOTA uploader
+docs/manual.md           OCR of the LY485 protocol manual
 ```
 
 OTA is split by transport: `wifi_network.cpp` owns the UDP-based ArduinoOTA,
@@ -161,15 +162,18 @@ OTA is split by transport: `wifi_network.cpp` owns the UDP-based ArduinoOTA,
 ```
 setup()
   valveControlSetup()    all relays LOW first — a reset must never leave a
-                         valve energised while the network comes up
-  wifiSetup()            blocks until associated, then starts ArduinoOTA
+                         valve energised while the network comes up.
+                         Also resets the humidity controller (duty 0).
+  wifiSetup()            blocks until associated, starts ArduinoOTA, then
+                         requests NTP time sync (Europe/Budapest, for the
+                         humidity automation's wall-clock-aligned periods)
   webSetup()             routes + ElegantOTA + server.begin()
   sensorsSetup()         UART2 + DE pin
 
 loop()   every SCAN_CYCLE_MS (50 ms)
   wifiLoop()             ArduinoOTA + association watchdog
   webLoop()              HTTP requests + ElegantOTA
-  valveControlLoop()     button + automation rungs
+  valveControlLoop()     button + automation rungs (humidityControlLoop())
   sensorsLoop()          non-blocking Modbus poll, one probe per 5 s
 ```
 
@@ -183,7 +187,7 @@ needs editing — the API, dashboard, button and poller all iterate them.
 
 ```cpp
 IOOutput OUTPUTS[] = {
-    {"relay1", "Valve 1", RELAY_1_PIN, true},   // name, label, pin, controllable
+    {"relay1", "☁️ MIST", RELAY_1_PIN, true},   // name, label, pin, controllable
     {"status_led", "Status LED", STATUS_LED_PIN, false},
 };
 
@@ -203,8 +207,8 @@ of the dashboard:
 
 | Mode | Colour | Behaviour |
 | --- | --- | --- |
-| **AUTOMATIC** | green | `runAutomation()` owns the valves. Manual commands are refused with `409`, and the dashboard shows states as read-only text |
-| **MANUAL** | amber | The automation is suspended and each valve gets an OPEN/CLOSE button |
+| **AUTOMATIC** | green | `runAutomation()` owns the valves, delegating to `humidityControlLoop()`. Manual commands are refused with `409`, and the dashboard shows states as read-only text plus an Automation panel (target, duty cycle, time to next period) |
+| **MANUAL** | amber | The automation is suspended and each valve gets a button showing its current state — CLOSED at rest, OPEN once pressed |
 
 **Every mode change closes all valves first.** Neither owner inherits the other's
 state: manual does not start with whatever the rungs left open, and the
@@ -232,9 +236,19 @@ repeat. Turn it off before connecting real valves — switching a 1" valve once 
 second hammers the pipework.
 
 Sensor-driven rules go in `runAutomation()` in
-[src/valve_control.cpp](src/valve_control.cpp). Check `reading.valid` before
-acting: a probe that has dropped off the bus keeps its last values, and deciding
-on stale humidity would leave a valve open.
+[src/valve_control.cpp](src/valve_control.cpp), which just delegates to
+[src/humidity_control.cpp](src/humidity_control.cpp) — isolated in its own
+module so the relay/button/mode plumbing in `valve_control.cpp` stays free of
+control-theory. That module time-proportions the MIST valve (`relay1`) like a
+slow PWM: every `HUMIDITY_PERIOD_S` (10 min, aligned to the Hungarian wall
+clock via NTP) it samples `SENSORS[HUMIDITY_SENSOR_INDEX]`, checks
+`reading.valid` first (a probe that has dropped off the bus keeps its last
+values, and deciding on stale humidity would waste water), and adjusts the duty
+cycle towards `HUMIDITY_TARGET_PCT` (90 %RH): dropping to 0 immediately once at
+or above target since the valve only ever adds moisture, otherwise ramping up
+by a capped step per period to tolerate the probe's 1-5 minute lag in its IP67
+case without overshooting. The valve then runs for `duty * period` starting at
+the period boundary and stays shut for the remainder.
 
 ### RS485 sensors
 
@@ -505,12 +519,13 @@ Work down this list — each step rules out one layer.
 ## Status
 
 Working: WiFi with reconnect watchdog, dashboard, JSON API, OTA over three
-transports, button-toggled Valve 1, and two probes (`Sensor-A`, `Sensor-B`)
+transports, button-toggled valves (with per-valve state, not per-valve action,
+shown on the dashboard), NTP-synced clock, a duty-cycle humidity controller
+for the MIST valve targeting 90 %RH, and two probes (`Sensor-A`, `Sensor-B`)
 polling cleanly over RS485.
 
 Next:
 
 - Fit the 24 V AC transformer for the Hunter PGV valves.
-- Implement the irrigation rules in `runAutomation()`
-  ([src/valve_control.cpp](src/valve_control.cpp)), mirroring the rung style of
-  `Garden_IS_ESP32_PLC_14_IO/src/logic.cpp`.
+- Tune `HUMIDITY_DUTY_GAIN` / `HUMIDITY_DUTY_MAX_STEP` in
+  [include/config.h](include/config.h) once real enclosure lag is measured.

@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <ArduinoOTA.h>
 #include <WiFi.h>
+#include <time.h>
 
 #include "config.h"
 #include "io_config.h"
@@ -43,6 +44,15 @@ namespace
         Serial.println("\n[WIFI] connected, IP " + WiFi.localIP().toString());
     }
 
+    // Europe/Budapest wall clock, DST handled by the POSIX TZ rule. The
+    // humidity automation aligns its periods to this clock, so getting it
+    // right matters more here than in a typical dashboard.
+    void syncTime()
+    {
+        configTzTime(BUDAPEST_TZ, NTP_SERVER_1, NTP_SERVER_2);
+        Serial.println("[NTP] sync requested (Europe/Budapest)");
+    }
+
     void setupArduinoOta()
     {
         ArduinoOTA.setHostname(OTA_HOSTNAME);
@@ -75,6 +85,7 @@ void wifiSetup()
     pinMode(STATUS_LED_PIN, OUTPUT);
     connectWiFi();
     setupArduinoOta();
+    syncTime();
 }
 
 void wifiLoop()
@@ -88,5 +99,6 @@ void wifiLoop()
         digitalWrite(STATUS_LED_PIN, LOW);
         Serial.println("[WIFI] lost, reconnecting");
         connectWiFi();
+        syncTime();
     }
 }

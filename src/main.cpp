@@ -27,10 +27,10 @@
 // from the API, the button and the click-test — used for the status LED, which
 // the WiFi module drives.
 IOOutput OUTPUTS[] = {
-    {"relay1", "Valve 1", RELAY_1_PIN, true},
-    {"relay2", "Valve 2", RELAY_2_PIN, true},
-    {"relay3", "Valve 3", RELAY_3_PIN, true},
-    {"relay4", "Valve 4", RELAY_4_PIN, true},
+    {"relay1", "☁️ MIST", RELAY_1_PIN, true},
+    {"relay2", "💦 RAIN", RELAY_2_PIN, true},
+    {"relay3", "💧 DRIP", RELAY_3_PIN, true},
+    {"relay4", "💡 LIGHT", RELAY_4_PIN, true},
     {"status_led", "Status LED", STATUS_LED_PIN, false},
 };
 

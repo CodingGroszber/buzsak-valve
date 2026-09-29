@@ -3,6 +3,7 @@
 
 #include "config.h"
 #include "io_config.h"
+#include "humidity_control.h"
 #include "sensors.h"
 #include "valve_control.h"
 
@@ -15,7 +16,8 @@
 //  or a minimum gap between switching operations belong there, not scattered
 //  across the callers.
 //
-//  Sensor-driven automation goes in runAutomation() at the bottom of this file.
+//  Sensor-driven automation itself lives in humidity_control.cpp/.h;
+//  runAutomation() at the bottom of this file just calls into it.
 // ═════════════════════════════════════════════════════════════════════════════
 
 #ifndef RELAY_TEST_ENABLED
@@ -129,13 +131,13 @@ namespace
     }
 
     // ── Automation rungs ─────────────────────────────────────────────────────
-    // Sensor-driven valve logic belongs here. Readings come from
-    // sensorReading(i); always check `.valid` first, because a probe that has
-    // dropped off the bus keeps its last values and acting on stale humidity
-    // would leave a valve open. Nothing is implemented yet — the irrigation
-    // rules are still to be defined.
+    // Sensor-driven valve logic belongs here. The humidity/mist logic itself
+    // is isolated in humidity_control.cpp/.h; this just delegates to it so
+    // future rungs (a second zone, a schedule override, ...) have a place to
+    // slot in alongside without touching that module.
     void runAutomation()
     {
+        humidityControlLoop();
     }
 } // namespace
 
@@ -148,6 +150,8 @@ void valveControlSetup()
         pinMode(OUTPUTS[i].pin, OUTPUT);
         digitalWrite(OUTPUTS[i].pin, LOW);
     }
+
+    humidityControlSetup();
 }
 
 void valveControlLoop()
