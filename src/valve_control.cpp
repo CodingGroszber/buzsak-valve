@@ -4,6 +4,7 @@
 #include "config.h"
 #include "io_config.h"
 #include "humidity_control.h"
+#include "rain_control.h"
 #include "sensors.h"
 #include "valve_control.h"
 
@@ -31,10 +32,12 @@ namespace
     uint32_t lastButtonMs = 0;
     bool buttonWasDown = false;
 
+    // Skips alwaysManual outputs (LIGHT): those sit outside the mode group, so
+    // a handover between automatic and manual must not touch them.
     void setAllRelays(uint8_t level)
     {
         for (int i = 0; i < NUM_OUTPUTS; i++)
-            if (OUTPUTS[i].controllable)
+            if (OUTPUTS[i].controllable && !OUTPUTS[i].alwaysManual)
                 digitalWrite(OUTPUTS[i].pin, level);
     }
 
@@ -138,6 +141,7 @@ namespace
     void runAutomation()
     {
         humidityControlLoop();
+        rainControlLoop();
     }
 } // namespace
 
@@ -152,6 +156,7 @@ void valveControlSetup()
     }
 
     humidityControlSetup();
+    rainControlSetup();
 }
 
 void valveControlLoop()

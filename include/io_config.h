@@ -17,6 +17,10 @@ struct IOOutput
     const char *label; // human-readable name shown on the dashboard
     int pin;           // GPIO number
     bool controllable; // true = switchable via the API, the button and the test
+    // true = excluded from the automatic/manual mode group entirely: always
+    // operable by hand, unaffected by mode handovers and never driven by an
+    // automation rung. Used for the LIGHT relay.
+    bool alwaysManual;
 };
 
 // An RS485 temperature/humidity probe.

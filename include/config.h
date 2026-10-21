@@ -119,8 +119,8 @@ constexpr time_t MIN_VALID_EPOCH = 1704067200;
 // starting at the period boundary, then stays shut for the remainder.
 constexpr const char *HUMIDITY_VALVE_NAME = "relay1"; // the MIST valve
 constexpr int HUMIDITY_SENSOR_INDEX = 0;              // SENSORS[0], "sensor_a"
-constexpr float HUMIDITY_TARGET_PCT = 70.0f;
-constexpr uint32_t HUMIDITY_PERIOD_S = 10 * 60; // period + PWM base, wall-clock aligned
+constexpr float HUMIDITY_TARGET_PCT = 90.0f;
+constexpr uint32_t HUMIDITY_PERIOD_S = 5 * 60; // period + PWM base, wall-clock aligned
 // Duty increases by (deficit_%RH * gain) each period, capped at max-step so a
 // single stale/low reading (the probe lags 1-5 min behind the real air state
 // in its IP67 case) cannot slam the valve to full duty in one jump.
@@ -129,3 +129,14 @@ constexpr float HUMIDITY_DUTY_MAX_STEP = 0.25f;
 // The process only ever adds moisture, so once the target is reached or beaten
 // the cheapest way to save water is to cut the valve immediately rather than
 // ramp it down - there is no equivalent "too wet" actuator to fight with.
+
+// ── Rain automation ──────────────────────────────────────────────────────────
+// See rain_control.cpp. The rain valve (relay2) runs once a day for a fixed
+// duration, at the local wall-clock time below (DST-aware via BUDAPEST_TZ).
+// START/DURATION are only the defaults; the dashboard overrides them and the
+// override is persisted in NVS.
+constexpr const char *RAIN_VALVE_NAME = "relay2"; // the RAIN valve
+constexpr int RAIN_START_HOUR = 5;                // default, local time, 0-23
+constexpr int RAIN_START_MINUTE = 0;              // default, local time, 0-59
+constexpr uint32_t RAIN_DURATION_S = 20 * 60;     // default straight run, no duty-cycling
+constexpr int RAIN_DURATION_MAX_MIN = 60;         // upper limit accepted from the dashboard
